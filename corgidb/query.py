@@ -68,6 +68,13 @@ class CorgiQuery:
                 )
             except (pandas.errors.EmptyDataError, pandas.errors.ParserError):
                 self.starcache = pandas.DataFrame(columns=STAR_COLUMNS)
+            else:
+                deduped = self.starcache.drop_duplicates(
+                    subset="main_id", keep="last"
+                ).reset_index(drop=True)
+                if len(deduped) != len(self.starcache):
+                    _atomic_write_csv(deduped, self._starcache_path)
+                self.starcache = deduped
         else:
             self.starcache = pandas.DataFrame(columns=STAR_COLUMNS)
 
@@ -142,6 +149,7 @@ class CorgiQuery:
         if fetched.empty:
             return
 
+        fetched = fetched.drop_duplicates(subset="main_id", keep="last")
         self.starcache = pandas.concat(
             [
                 self.starcache[~self.starcache["main_id"].isin(fetched["main_id"])],
@@ -279,6 +287,7 @@ class CorgiQuery:
         # SIMBAD fallback for names corgidb has never heard of.
         cached_ids = set(self.starcache["main_id"])
         simbad_ids_for_name: dict[str, str] = {}
+        newly_fetched_ids: set = set()
         new_simbad_rows = []
         for name in st_names:
             if name in resolved:
@@ -291,8 +300,13 @@ class CorgiQuery:
             simbad_row = self.query_simbad(name)
             if simbad_row.empty:
                 continue
-            simbad_ids_for_name[name] = simbad_row.iloc[0]["main_id"]
-            new_simbad_rows.append(simbad_row)
+            mid = simbad_row.iloc[0]["main_id"]
+            simbad_ids_for_name[name] = mid
+            # a different name earlier in this same batch may have already
+            # resolved to the same SIMBAD main_id; only queue one row for it
+            if mid not in cached_ids and mid not in newly_fetched_ids:
+                newly_fetched_ids.add(mid)
+                new_simbad_rows.append(simbad_row)
 
         if new_simbad_rows:
             self._merge_into_cache(pandas.concat(new_simbad_rows, ignore_index=True))
@@ -312,8 +326,9 @@ class CorgiQuery:
             return pandas.DataFrame(columns=STAR_COLUMNS)
 
         present_ids = [i for i in ordered_ids if i in set(self.starcache["main_id"])]
+        starcache_unique = self.starcache.drop_duplicates(subset="main_id", keep="last")
         return (
-            self.starcache.set_index("main_id", drop=False)
+            starcache_unique.set_index("main_id", drop=False)
             .reindex(present_ids)
             .reset_index(drop=True)
         )
